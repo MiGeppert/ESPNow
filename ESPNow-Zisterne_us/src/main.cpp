@@ -7,28 +7,35 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 
-#define DEFAULT_SSID "SaHiCo2"
-#define DEFAULT_PASS "DEIN_WLAN_PASSWORT"
-#define DEFAULT_GATEWAY "90:70:69:33:73:F4"
-#define DEFAULT_HOSTNAME "zisterne_us"
-#define DEFAULT_SLEEP 30 
+#define DEFAULT_SSID "SSID"
+#define DEFAULT_PASS "PASSWORD"
+//#define DEFAULT_GATEWAY "90:70:69:33:73:F4"
+#define DEFAULT_GATEWAY "00:00:00:00:00:00"
+#define DEFAULT_HOSTNAME "espnow_sensor"
+#define DEFAULT_SLEEP 30
 #define RETRIES 5 
 
 #define FIRMWARE_VERSION 26 
 #define SENSOR_TYPE 1       
 #define JUMPER_PIN 13       
 #define US_POWER_PIN 4      
+#define DEFAULT_ADC_PIN 34
+#define DEFAULT_ADC_FACTOR 2.0f
 
 const uint8_t channels[] = {6, 1, 11}; 
 const uint8_t numChannels = 3;
 
 typedef struct __attribute__((__packed__)) struct_distance {
-    float distance; uint8_t ok; uint8_t jumper; uint8_t ota_state; 
+    float distance;  
+    uint8_t ok;      
+    uint8_t jumper;  
+    uint8_t ota_state; 
+    float battery_voltage;
 } struct_distance;
 
 typedef struct __attribute__((__packed__)) struct_universal_message {
     uint8_t sensor_type; uint8_t firmware_ver; 
-    uint8_t payload[240]; // KORREKTUR: Jetzt absolut sauber als echtes Array deklariert!
+    uint8_t payload[240];
 } struct_universal_message;
 
 HardwareSerial JSNSerial(1); 
@@ -39,8 +46,10 @@ bool stayAwakeForOTA = false;
 uint32_t lastMeasurementTime = 0;
 
 String wifi_ssid, wifi_pass, gateway_mac_str, device_hostname;
-uint8_t gatewayMac[6]; // KORREKTUR: Auch hier das 6-Byte-Array festgeschrieben
+uint8_t gatewayMac[6];
 uint32_t sleepTimeSeconds;
+uint8_t adc_pin;
+float adc_factor;
 
 Preferences preferences;
 WebServer server(80);
@@ -99,6 +108,10 @@ void runMeasurementCycle() {
     myData.jumper = (digitalRead(JUMPER_PIN) == LOW) ? 1 : 0;
     myData.ota_state = stayAwakeForOTA ? 1 : 0;
 
+    int rawAnalog = analogRead(adc_pin); 
+    float voltAtPin = (rawAnalog / 4095.0f) * 3.3f;
+    myData.battery_voltage = voltAtPin * adc_factor;
+
     outPacket.sensor_type = SENSOR_TYPE; outPacket.firmware_ver = FIRMWARE_VERSION;
     memcpy(outPacket.payload, &myData, sizeof(myData));
 
@@ -132,16 +145,19 @@ void handleRoot() {
     html += "<label>Passwort:</label><input type='password' name='pass' value='" + wifi_pass + "'>";
     html += "<label>Gateway MAC:</label><input type='text' name='mac' value='" + gateway_mac_str + "'>";
     html += "<label>Schlafzeit (s):</label><input type='number' name='sleep' value='" + String(sleepTimeSeconds) + "'>";
+    html += "<label>ADC Pin:</label><input type='number' name='adc_pin' value='" + String(adc_pin) + "'>";
+    html += "<label>ADC Faktor:</label><input type='number' step='any' name='adc_factor' value='" + String(adc_factor) + "'>";
     html += "<button type='submit'>Speichern</button></form></div></body></html>";
     server.send(200, "text/html", html);
 }
 
 void handleSave() {
-    if (server.hasArg("ssid") && server.hasArg("pass") && server.hasArg("mac") && server.hasArg("sleep") && server.hasArg("hostname")) {
+    if (server.hasArg("ssid") && server.hasArg("pass") && server.hasArg("mac") && server.hasArg("sleep") && server.hasArg("hostname") && server.hasArg("adc_pin") && server.hasArg("adc_factor")) {
         if (preferences.begin("zisterne_cfg", false)) {
             preferences.putString("wifi_ssid", server.arg("ssid")); preferences.putString("wifi_pass", server.arg("pass"));
             preferences.putString("gateway_mac", server.arg("mac")); preferences.putString("dev_hostname", server.arg("hostname"));
-            preferences.putUInt("sleep_sec", server.arg("sleep").toInt()); preferences.end();
+            preferences.putUInt("sleep_sec", server.arg("sleep").toInt()); preferences.putUChar("adc_pin", (uint8_t)server.arg("adc_pin").toInt()); 
+            preferences.putFloat("adc_factor", server.arg("adc_factor").toFloat()); preferences.end();
         }
         server.send(200, "text/html", "<h3>Gespeichert! Starte neu...</h3>"); delay(2000); esp_restart();
     } else { server.send(400, "text/plain", "Fehler"); }
@@ -152,59 +168,71 @@ void setup() {
     pinMode(JUMPER_PIN, INPUT_PULLUP); pinMode(US_POWER_PIN, OUTPUT);
 
     if (!preferences.begin("zisterne_cfg", true)) {
-        preferences.begin("zisterne_cfg", false); preferences.end(); preferences.begin("zisterne_cfg", true);
+        preferences.begin("zisterne_cfg", false); 
+        preferences.end(); 
+        preferences.begin("zisterne_cfg", true);
     }
-    wifi_ssid = preferences.getString("wifi_ssid", DEFAULT_SSID); wifi_pass = preferences.getString("wifi_pass", DEFAULT_PASS);
-    gateway_mac_str = preferences.getString("gateway_mac", DEFAULT_GATEWAY); device_hostname = preferences.getString("dev_hostname", DEFAULT_HOSTNAME);
-    sleepTimeSeconds = preferences.getUInt("sleep_sec", DEFAULT_SLEEP); preferences.end();
+    wifi_ssid = preferences.getString("wifi_ssid", DEFAULT_SSID); 
+    wifi_pass = preferences.getString("wifi_pass", DEFAULT_PASS);
+    gateway_mac_str = preferences.getString("gateway_mac", DEFAULT_GATEWAY); 
+    device_hostname = preferences.getString("dev_hostname", DEFAULT_HOSTNAME);
+    sleepTimeSeconds = preferences.getUInt("sleep_sec", DEFAULT_SLEEP); 
+    adc_pin = preferences.getUChar("adc_pin", DEFAULT_ADC_PIN);
+    adc_factor = preferences.getFloat("adc_factor", DEFAULT_ADC_FACTOR);
+    preferences.end();
 
     parseMacAddress(gateway_mac_str, gatewayMac);
-    WiFi.mode(WIFI_STA);
-    if (esp_now_init() == ESP_OK) { esp_now_register_recv_cb((esp_now_recv_cb_t)OnDataRecv); runMeasurementCycle(); }
 
-    if (digitalRead(JUMPER_PIN) == HIGH && !stayAwakeForOTA) enterDeepSleep(); 
+    // PRÜFUNG: Ist der Sensor noch im Werkszustand (MAC genullt)?
+    bool isFactoryReset = (gateway_mac_str == "00:00:00:00:00:00" || wifi_ssid == "KEIN_WLAN");
 
-    Serial.println("\nWachmodus aktiv!"); esp_now_deinit(); 
-    String ap_name = device_hostname + "_ap"; 
-    WiFi.setHostname(device_hostname.c_str()); 
+    if (!isFactoryReset) {
+        // Normaler Betrieb: ESPNOW starten und Messung senden
+        WiFi.mode(WIFI_STA);
+        if (esp_now_init() == ESP_OK) {
+            esp_now_register_recv_cb((esp_now_recv_cb_t)OnDataRecv);
+            runMeasurementCycle();
+        }
+
+        // DeepSleep Entscheidung (nur wenn nicht der Jumper oder OTA uns wach hält)
+        if (digitalRead(JUMPER_PIN) == HIGH && !stayAwakeForOTA) {
+            enterDeepSleep(); 
+        }
+    } else {
+        Serial.println("[System] Sensor ist unkonfiguriert. Erpringe Senden und starte direkt das Portal!");
+    }
+
+    // --- AB HIER STARTET DAS PORTAL (FÜR SERVICE-JUMPER, OTA ODER JUNGFRÄULICHE SENSOREN) ---
+    Serial.println("\nWachmodus/Setup aktiv!");
+    if (esp_now_init() == ESP_OK) esp_now_deinit(); // Sicherstellen, dass ESPNow aus ist
+
+    String ap_name = device_hostname + "_ap";
+    WiFi.setHostname(device_hostname.c_str());
     
-    // REPARATUR: Löscht die alten, intern im Chip gemerkten Zugangsdaten restlos,
-    // damit ein falsches Passwort im Webformular auch wirklich als "falsch" erkannt wird!
-    WiFi.disconnect(true, true);
-    delay(500); // Dem Funkchip Zeit geben, die Tabellen zu leeren
-
-    // Startet den echten Verbindungsversuch mit den Daten aus den Preferences
+    // Verbindungsversuch zum Router (wird bei "KEIN_WLAN" sofort fehlschlagen)
     WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
     
     uint32_t wifiTimeout = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - wifiTimeout < 10000) { 
-        delay(500); 
-        Serial.print("."); 
+    while (WiFi.status() != WL_CONNECTED && millis() - wifiTimeout < 5000) { // Auf 5 Sek. verkürzt für schnelleren AP-Start
+        delay(500); Serial.print(".");
     }
+    Serial.print("\n");
 
-    // FALL 1: Router ist mit den übergebenen Daten NICHT erreichbar -> Eigenen AP öffnen
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("\nHeim-WLAN nicht erreichbar. Oeffne eigenen Access Point...");
-        WiFi.disconnect(true, true); 
-        delay(500); 
-
-        WiFi.mode(WIFI_AP); 
-        String ap_pass = ap_name;
-        while (ap_pass.length() < 8) ap_pass += "1"; 
+        WiFi.mode(WIFI_AP);
+        WiFi.disconnect(true, true);
+        delay(200);
+        
+        String ap_pass = wifi_pass; // Nutzt das DEFAULT_PASS ("ESPNow_Sensor") als Passwort
+        while (ap_pass.length() < 8) ap_pass += "1";
         
         if (WiFi.softAP(ap_name.c_str(), ap_pass.c_str())) {
             dnsServer.start(53, "*", WiFi.softAPIP());
-            Serial.printf("Hotspot erfolgreich geoeffnet!\nName: %s\nPW: %s\nIP: %s\n", 
+            Serial.printf("\nHotspot geoeffnet!\nName: %s\nPW: %s\nIP: %s\n", 
                           ap_name.c_str(), ap_pass.c_str(), WiFi.softAPIP().toString().c_str());
-        } else {
-            Serial.println("[Fehler] Hotspot-Start fehlgeschlagen!");
         }
-    } 
-    // FALL 2: Erfolgreich im Heim-WLAN eingeloggt (mit den neuen, korrekten Daten)
-    else {
-        Serial.print("\n[WLAN] Erfolgreich mit Router verbunden! ");
-        Serial.print("IP-Adresse: ");
-        Serial.println(WiFi.localIP().toString());
+    } else {
+        Serial.println("\nVerbunden mit Router! IP: " + WiFi.localIP().toString());
     }
 
     server.on("/", handleRoot); 
