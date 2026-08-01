@@ -238,6 +238,14 @@ void setup() {
     server.on("/", handleRoot); 
     server.on("/save", HTTP_POST, handleSave);
     server.on("/favicon.ico", []() { server.send(204); });
+
+    server.on("/generate_204", []() { server.send(204); });
+    server.on("/success.txt", []() { server.send(200, "text/plain", "success"); });
+    server.on("/ncsi.txt", []() { server.send(200, "text/plain", "success"); });
+    server.on("/hotspot-detect.html", []() { server.send(200, "text/html", "success"); });
+    server.on("/connecttest.txt", []() { server.send(200, "text/plain", "success"); });
+    server.on("/wpad.dat", []() { server.send(204); });
+
     server.onNotFound(handleRoot); 
     server.begin();
     ArduinoOTA.setHostname(device_hostname.c_str()); 
@@ -248,6 +256,10 @@ void setup() {
 void loop() {
     if (WiFi.getMode() == WIFI_MODE_AP) dnsServer.processNextRequest();
     server.handleClient(); ArduinoOTA.handle();
-    if (millis() - lastMeasurementTime > 60000) { lastMeasurementTime = millis(); float d; readUltrasonicSensor(d); }
+    bool isPortalActive = (WiFi.getMode() == WIFI_MODE_AP || gateway_mac_str == "00:00:00:00:00:00");
+
+    if (!isPortalActive && (millis() - lastMeasurementTime > 60000)) {
+        lastMeasurementTime = millis(); float d; readUltrasonicSensor(d); 
+    }
     delay(10);
 }
