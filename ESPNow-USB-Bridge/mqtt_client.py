@@ -89,7 +89,7 @@ class MQTTBridgeClient:
 
         elif value_key == "battery":
             ha_type = "sensor"
-            device_class = "voltage"
+            device_class, unit = "voltage", "V"
             friendly_key_name = "Spannung"
 
         elif value_key == "ok":
@@ -115,7 +115,7 @@ class MQTTBridgeClient:
         state_topic = custom_topic if custom_topic else f"{BASE_TOPIC}/{mac}/state"
 
         payload = {
-            "name": f"{device_name} {friendly_key_name}",
+            "name": friendly_key_name,
             "unique_id": f"espnow_{entity_id}",
             "state_topic": state_topic,
             "value_template": f"{{{{ value_json.{value_key} \n}}}}",

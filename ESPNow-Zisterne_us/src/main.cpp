@@ -18,7 +18,7 @@
 #define FIRMWARE_VERSION 26 
 #define SENSOR_TYPE 1       
 #define JUMPER_PIN 13       
-#define US_POWER_PIN 4      
+#define SEN_POWER_PIN 4      
 #define DEFAULT_ADC_PIN 34
 #define DEFAULT_ADC_FACTOR 2.0f
 
@@ -38,7 +38,7 @@ typedef struct __attribute__((__packed__)) struct_universal_message {
     uint8_t payload[240];
 } struct_universal_message;
 
-HardwareSerial JSNSerial(1); 
+HardwareSerial SensorSerial(1); 
 struct_distance myData;
 struct_universal_message outPacket;
 volatile bool ackReceived = false;
@@ -75,7 +75,7 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incoming, int len) {
         int parsedVal = msg.substring(6).toInt();
         if (parsedVal >= 10 && parsedVal < 86400) {
             sleepTimeSeconds = parsedVal;
-            if (preferences.begin("zisterne_cfg", false)) {
+            if (preferences.begin("sensor_cfg", false)) {
                 preferences.putUInt("sleep_sec", sleepTimeSeconds); preferences.end();
             }
         }
@@ -87,14 +87,14 @@ void setWifiChannel(uint8_t channel) {
 }
 
 bool readUltrasonicSensor(float &resultDistance) {
-    digitalWrite(US_POWER_PIN, HIGH); delay(500); 
-    while(JSNSerial.available()) JSNSerial.read();
-    JSNSerial.write(0x55);
+    digitalWrite(SEN_POWER_PIN, HIGH); delay(500); 
+    while(SensorSerial.available()) SensorSerial.read();
+    SensorSerial.write(0x55);
     uint32_t start_time = millis(); uint8_t buf[4] = {0}; int bytesRead = 0;
     while ((millis() - start_time < 150) && (bytesRead < 4)) {
-        if (JSNSerial.available()) buf[bytesRead++] = JSNSerial.read();
+        if (SensorSerial.available()) buf[bytesRead++] = SensorSerial.read();
     }
-    digitalWrite(US_POWER_PIN, LOW); 
+    digitalWrite(SEN_POWER_PIN, LOW); 
     if (bytesRead != 4 || buf[0] != 0xFF) return false;
     if (((buf[0] + buf[1] + buf[2]) & 0xFF) != buf[3]) return false;
     resultDistance = ((buf[1] << 8) | buf[2]) / 10.0f; return true;
@@ -153,7 +153,7 @@ void handleRoot() {
 
 void handleSave() {
     if (server.hasArg("ssid") && server.hasArg("pass") && server.hasArg("mac") && server.hasArg("sleep") && server.hasArg("hostname") && server.hasArg("adc_pin") && server.hasArg("adc_factor")) {
-        if (preferences.begin("zisterne_cfg", false)) {
+        if (preferences.begin("sensor_cfg", false)) {
             preferences.putString("wifi_ssid", server.arg("ssid")); preferences.putString("wifi_pass", server.arg("pass"));
             preferences.putString("gateway_mac", server.arg("mac")); preferences.putString("dev_hostname", server.arg("hostname"));
             preferences.putUInt("sleep_sec", server.arg("sleep").toInt()); preferences.putUChar("adc_pin", (uint8_t)server.arg("adc_pin").toInt()); 
@@ -164,13 +164,13 @@ void handleSave() {
 }
 
 void setup() {
-    Serial.begin(115200); JSNSerial.begin(9600, SERIAL_8N1, 16, 17); 
-    pinMode(JUMPER_PIN, INPUT_PULLUP); pinMode(US_POWER_PIN, OUTPUT);
+    Serial.begin(115200); SensorSerial.begin(9600, SERIAL_8N1, 16, 17); 
+    pinMode(JUMPER_PIN, INPUT_PULLUP); pinMode(SEN_POWER_PIN, OUTPUT);
 
-    if (!preferences.begin("zisterne_cfg", true)) {
-        preferences.begin("zisterne_cfg", false); 
+    if (!preferences.begin("sensor_cfg", true)) {
+        preferences.begin("sensor_cfg", false); 
         preferences.end(); 
-        preferences.begin("zisterne_cfg", true);
+        preferences.begin("sensor_cfg", true);
     }
     wifi_ssid = preferences.getString("wifi_ssid", DEFAULT_SSID); 
     wifi_pass = preferences.getString("wifi_pass", DEFAULT_PASS);
