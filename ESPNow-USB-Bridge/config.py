@@ -13,5 +13,6 @@ BASE_TOPIC = "espnow"
 
 DEVICE_MAPPING = {
     "3c610532519c": ("Zisterne Ultraschall", "espnow/zisterne_us"),
+    "aabbccddeeff": ("Zisterne Radar", "espnow/zisterne_radar")
     "aabbccddeeff": ("Garagen Parksensor", "espnow/parksensor"),
 }

@@ -72,50 +72,73 @@ class MQTTBridgeClient:
         if not self.is_connected:
             return
 
-        # ALLER-WICHTIGSTER FIX: Alle Variablen sauber für Python vorinitialisieren
         ha_type = "sensor"
         device_class = None
         unit = None
-        state_class = None  
+        state_class = None
         payload_on = None
         payload_off = None
 
-        friendly_key_name = value_key.capitalize()
-
-        if value_key == "distance":
-            ha_type = "sensor"
-            device_class, unit, friendly_key_name = "distance", "cm", "Füllstand"
+        # Standard-Namenskonvertierung
+        friendly_key_name = value_key.upper()
+        
+        # =========================================================================
+        # PROZESSWERTE PARSER FÜR SENSOR ID 2 (RADAR)
+        # =========================================================================
+        if value_key == "pv1":
+            friendly_key_name = "Messwert 1 (Abstand)"
+            state_class = "measurement"
+            unit = "m"  # Radarsensoren liefern oft Meter. Falls es cm sind, einfach in "cm" ändern!
+        elif value_key == "pv2":
+            friendly_key_name = "Messwert 2"
+            state_class = "measurement"
+        elif value_key == "pv3":
+            friendly_key_name = "Messwert 3"
+            state_class = "measurement"
+        elif value_key == "pv4":
+            friendly_key_name = "Messwert 4"
+            state_class = "measurement"
+        elif value_key == "pv5":
+            friendly_key_name = "Messwert 5"
             state_class = "measurement"
 
+        # =========================================================================
+        # GEMEINSAME INFRASTRUKTUR-WERTE (ZISTERNE & RADAR)
+        # =========================================================================
+        elif value_key == "distance":
+            device_class, unit, friendly_key_name = "distance", "cm", "Füllstand"
+            state_class = "measurement"
+            
         elif value_key == "battery":
-            ha_type = "sensor"
-            device_class, unit = "voltage", "V"
-            friendly_key_name = "Spannung"
-
+            # Deine erarbeitete, funktionierende Spannungs-Konfiguration
+            device_class, unit, friendly_key_name = "voltage", "V", "Spannung"
+            state_class = "measurement"
+            
         elif value_key == "ok":
             ha_type = "binary_sensor"
             device_class, unit, friendly_key_name = "connectivity", None, "Status"
             payload_on, payload_off = "1", "0"
-
+            
         elif value_key == "jumper":
             ha_type = "binary_sensor"
             device_class, unit, friendly_key_name = None, None, "Service Jumper"
             payload_on, payload_off = "1", "0"
-
+            
         elif value_key == "ota_mode":
             ha_type = "binary_sensor"
-            device_class, unit, friendly_key_name = None, None, "OTA"
+            device_class, unit, friendly_key_name = None, None, "OTA Bestätigung"
             payload_on, payload_off = "1", "0"
-
+            
         elif value_key == "fw_version":
             ha_type = "sensor"
-            device_class, unit, friendly_key_name = None, None, "Firmware Version"
+            device_class, unit, friendly_key_name = None, None, "Firmware"
 
+        # JSON-Struktur für Home Assistant zusammenbauen
         discovery_topic = f"{DISCOVERY_PREFIX}/{ha_type}/{mac}/{value_key}/config"
         state_topic = custom_topic if custom_topic else f"{BASE_TOPIC}/{mac}/state"
-
+        
         payload = {
-            "name": friendly_key_name,
+            "name": friendly_key_name,  # Kurze Entity-IDs erzwingen
             "unique_id": f"espnow_{entity_id}",
             "state_topic": state_topic,
             "value_template": f"{{{{ value_json.{value_key} \n}}}}",
@@ -128,10 +151,10 @@ class MQTTBridgeClient:
                 "manufacturer": "MiGe"
             }
         }
-
+        
         if device_class: payload["device_class"] = device_class
         if unit: payload["unit_of_measurement"] = unit
-        if state_class: payload["state_class"] = state_class 
+        if state_class: payload["state_class"] = state_class
         if payload_on: payload["payload_on"] = payload_on
         if payload_off: payload["payload_off"] = payload_off
 
