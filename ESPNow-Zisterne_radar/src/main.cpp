@@ -9,12 +9,12 @@
 #include <DNSServer.h>
 #include <ModbusMaster.h>
 
-// Eigene Module einbinden
+// Eigene, neu strukturierte Module einbinden
 #include "structures.h"
 #include "modbus_radar.h"
 #include "web_portal.h"
 
-// --- CONFIG DEFAULTS (Zwei Blöcke wie gewünscht!) ---
+// --- CONFIG DEFAULTS ---
 //#define DEFAULT_SSID "SSID"
 //#define DEFAULT_PASS "PASSWORD"
 //#define DEFAULT_GATEWAY "00:00:00:00:00:00"
@@ -29,22 +29,32 @@
 #define RETRIES 5 
 #define DEFAULT_ADC_PIN 34
 #define DEFAULT_ADC_FACTOR 2.0f
-#define TCP_PORT 8888       // -> Dein zentrales Wunsch-Define für den Netzwerk-Port!
+#define TCP_PORT 8888       
 
-#define SENSOR_TYPE 2       
 #define JUMPER_PIN 13       
 #define SEN_POWER_PIN 4
+
+// AUTOMATISCHE HARDWARE-WEICHE FÜR DEN UNIFIED SENSOR TYPE
+#if defined(IS_ULTRASCHALL)
+  #define SENSOR_TYPE 1
+#elif defined(IS_RADAR)
+  #define SENSOR_TYPE 2
+#else
+  #error "SENSOR_TYPE konnte nicht zugewiesen werden! Pruefe platformio.ini."
+#endif
 
 const uint8_t channels[] = {6, 1, 11}; 
 const uint8_t numChannels = 3;
 
+// Globale Objekte und Infrastruktur-Variablen
 HardwareSerial SensorSerial(1); 
 ModbusMaster node;
-struct_radar myData;
+struct_sensor_payload myData;
 struct_universal_message outPacket;
 volatile bool ackReceived = false;
 bool stayAwakeForOTA = false;
 uint32_t lastMeasurementTime = 0;
+RTC_DATA_ATTR float dynamicRssi = -99.0f;
 
 String wifi_ssid, wifi_pass, gateway_mac_str, device_hostname;
 uint8_t gatewayMac[6]; 
@@ -54,11 +64,10 @@ float adc_factor;
 
 Preferences preferences; WebServer server(80); DNSServer dnsServer;
 
-// Verwende das eingetragene Define für den Server
 WiFiServer tcpServer(TCP_PORT);
 WiFiClient tcpClient;
 
-// --- PROTOTYPEN / VORAB-DEKLARATIONEN FÜR DEN COMPILER ---
+// --- HILFSFUNKTIONEN ---
 void parseMacAddress(String macStr, uint8_t *macArray) {
     unsigned int m[6];
     if (sscanf(macStr.c_str(), "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) == 6) {
@@ -70,21 +79,28 @@ void setWifiChannel(uint8_t channel) {
     esp_wifi_set_promiscuous(true); esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE); esp_wifi_set_promiscuous(false);
 }
 
-void sendOtaConfirmation() {
-    // Wir setzen im RAM-Speicher einfach nur den OTA-Status auf 1
-    myData.ota_state = 1;
+// =========================================================================
+// V3.2 UNIVERSELLE EXPRESS-RÜCKMELDUNG (STROM- UND ZEITSPAREND!)
+// =========================================================================
+void sendExpressConfirmation() {
+
+    myData.ok = 1; 
+
+    // Die neuen Infrastruktur-Werte live einpflegen
+    myData.sleep_seconds = sleepTimeSeconds; 
     myData.jumper = (digitalRead(JUMPER_PIN) == LOW) ? 1 : 0;
+    myData.ota_state = stayAwakeForOTA ? 1 : 0;
     
-    // Batteriespannung kurz aktualisieren (ohne Modbus-Stress)
     int rawAnalog = analogRead(adc_pin); 
     myData.battery_voltage = ((rawAnalog / 4096.0f) * 3.3f) * adc_factor;
 
-    // Header befüllen
+    myData.last_rssi = dynamicRssi;
+
+    // Das Paket wie gewohnt packen
     outPacket.sensor_type = SENSOR_TYPE; 
     outPacket.firmware_ver = FIRMWARE_VERSION;
     memcpy(outPacket.payload, &myData, sizeof(myData));
 
-    // Paket blitzschnell auf den bekannten Kanälen abfeuern
     for (uint8_t c = 0; c < numChannels; c++) {
         uint8_t targetChannel = channels[c]; 
         setWifiChannel(targetChannel);
@@ -92,72 +108,98 @@ void sendOtaConfirmation() {
         esp_now_peer_info_t peerInfo = {}; 
         memcpy(peerInfo.peer_addr, gatewayMac, 6);
         peerInfo.channel = targetChannel; 
-        peerInfo.encrypt = false;
         
         if (esp_now_is_peer_exist(gatewayMac)) esp_now_del_peer(gatewayMac);
         esp_now_add_peer(&peerInfo);
 
-        // Ein einzelner, schneller Schuss reicht als Bestätigung völlig aus!
         esp_now_send(gatewayMac, (uint8_t *)&outPacket, 2 + sizeof(myData));
-        delay(5); // Kurze Pause für die Hardware-Endstufe
+        delay(10); 
     }
-    Serial.println("[Funk] Schnelle OTA-Bestaetigung wurde gesendet!");
+    delay(100); 
+    Serial.println("[Funk] Universelle Express-Bestaetigung (mit Werten & OK=1) wurde gesendet!");
 }
 
-// --- SYSTEM CALLBACKS ---
+// --- ESP-NOW EMPFANGS CALLBACK ---
 void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incoming, int len) {
-    char buffer[32] = {0}; memcpy(buffer, incoming, (len < 31) ? len : 31);
-    String msg = String(buffer); msg.trim();
-    if (msg.equalsIgnoreCase("ACK")) ackReceived = true;
-    else if (msg.equalsIgnoreCase("OTA=1")) {
+    char buffer[32] = {0}; 
+    memcpy(buffer, incoming, (len < 31) ? len : 31);
+    String msg = String(buffer); 
+    msg.trim();
+    
+    int8_t currentRssi = -95;
+    #if defined(ARDUINO_ARCH_ESP32)
+        // Nutzt die interne WiFi-Struktur von Espressif, um den RSSI des letzten Pakets abzugreifen
+        currentRssi = WiFi.RSSI(); 
+    #endif
+
+    if (currentRssi < 0 && currentRssi > -120) {
+        dynamicRssi = currentRssi; // RAM-Puffer fuer das naechste Senden aktualisieren
+    }
+
+    Serial.printf("\n[Funk-Inbound] Paket empfangen! Inhalt: '%s' (Signal: %d dBm)\n", msg.c_str(), dynamicRssi);
+
+    if (msg.equalsIgnoreCase("ACK")) {
+        ackReceived = true;
+//        Serial.println("  -> Status: Gateway hat Datenpaket quittiert (ACK).");
+    }
+    else if (msg.equalsIgnoreCase("OTA=1")) { 
         ackReceived = true; 
         stayAwakeForOTA = true; 
-        sendOtaConfirmation(); 
-        Serial.println("OTA=1 Befehl erhalten!");
-
+        Serial.println("  -> Kommando erkannt: OTA-Modus AKTIVIERT. Bleibe dauerhaft wach!");
+//        sendExpressConfirmation(); // Zündet Express-Rückkanal
     }
     else if (msg.equalsIgnoreCase("OTA=0")) { 
         ackReceived = true; 
         stayAwakeForOTA = false; 
-        Serial.println("OTA=0 Befehl erhalten!");
+        Serial.println("  -> Kommando erkannt: OTA-Modus DEAKTIVIERT. Gehe wieder schlafen.");
+//        sendExpressConfirmation(); // Zündet Express-Rückkanal
     }
     else if (msg.startsWith("SLEEP=")) {
-        ackReceived = true; int parsedVal = msg.substring(6).toInt();
-        Serial.println("SLEEP=" + String(sleepTimeSeconds) + " Befehl erhalten!");
+        ackReceived = true; 
+        int parsedVal = msg.substring(6).toInt();
+        Serial.printf("  -> Kommando erkannt: Neue Schlafzeit angefordert: %d Sekunden.\n", parsedVal);
+        
         if (parsedVal >= 10 && parsedVal < 86400) {
+
             sleepTimeSeconds = parsedVal;
+            
+            preferences.end(); // Vorherige Lese-Verbindungen sicherheitshalber kappen
             if (preferences.begin("sensor_cfg", false)) { 
                 preferences.putUInt("sleep_sec", sleepTimeSeconds); 
                 preferences.end(); 
+                Serial.println("  -> Erfolg: Neue Schlafzeit dauerhaft im NVS-Flash gespeichert!");
             }
-        } else {
-            Serial.println("[Warnung] Ungültiger SLEEP-Wert empfangen: " + String(parsedVal));
+            
+            myData.sleep_seconds = sleepTimeSeconds;
+            
+//            sendExpressConfirmation(); 
+            
+            Serial.printf("  -> Sensor schlaeft gleich fuer %d Sekunden ein.\n", sleepTimeSeconds);
         }
-
     }
 }
 
+// --- REGULÄRER MESS- UND SENDEZYKLUS ---
 void runMeasurementCycle() {
     ackReceived = false; 
-    float sensorValues[5] = {0.0f};
-    bool measurementOk = readModbusSensor(sensorValues);
     
-    myData.pv1 = sensorValues[0]; 
-    myData.pv2 = sensorValues[1];
-    myData.pv3 = sensorValues[2]; 
-    myData.pv4 = sensorValues[3]; 
-    myData.pv5 = sensorValues[4];
+    // Weist das universelle Auslese-Modul an, Daten zu erfassen
+    bool measurementOk = readSensorHardware(myData);
+    
     myData.ok = measurementOk ? 1 : 0;
+    myData.sleep_seconds = sleepTimeSeconds; // Synchronisiert den echten Wert permanent mit dem Server
     myData.jumper = (digitalRead(JUMPER_PIN) == LOW) ? 1 : 0;
     myData.ota_state = stayAwakeForOTA ? 1 : 0;
 
     int rawAnalog = analogRead(adc_pin); 
     myData.battery_voltage = ((rawAnalog / 4096.0f) * 3.3f) * adc_factor;
 
-    outPacket.sensor_type = SENSOR_TYPE; outPacket.firmware_ver = FIRMWARE_VERSION;
-    //memcpy(outPacket.payload, &myData, sizeof(myData));
-    memcpy(&outPacket.payload[0], &myData, sizeof(myData));
-    
+    myData.last_rssi = dynamicRssi;
+
+    outPacket.sensor_type = SENSOR_TYPE; 
+    outPacket.firmware_ver = FIRMWARE_VERSION;
+    memcpy(outPacket.payload, &myData, sizeof(myData));
+
     for (uint8_t c = 0; c < numChannels; c++) {
         uint8_t targetChannel = channels[c]; setWifiChannel(targetChannel);
         esp_now_peer_info_t peerInfo = {}; memcpy(peerInfo.peer_addr, gatewayMac, 6);
@@ -169,7 +211,15 @@ void runMeasurementCycle() {
             Serial.printf("Sende Daten an Gateway %s auf Kanal %d (Versuch %d/%d)...\n", gateway_mac_str.c_str(), targetChannel, retry, RETRIES);
             esp_now_send(gatewayMac, (uint8_t *)&outPacket, 2 + sizeof(myData));
             uint32_t waitStart = millis();
-            while (millis() - waitStart < 100) { if (ackReceived) return; delay(5); }
+            while (millis() - waitStart < 100) { 
+                if (ackReceived) {
+                    if (stayAwakeForOTA || myData.sleep_seconds != sleepTimeSeconds) {
+                        sendExpressConfirmation();
+                    }
+                    return; 
+                }
+                delay(5); 
+            }
         }
     }
 }
@@ -194,6 +244,7 @@ void setup() {
 
     parseMacAddress(gateway_mac_str, gatewayMac);
     
+    // UART1 initialisieren (wird im Ultraschall-Modus einfach ignoriert)
     SensorSerial.begin(115200, SERIAL_8N1, 16, 17);
     node.begin(1, SensorSerial);
 
@@ -220,63 +271,49 @@ void setup() {
     server.begin(); 
     ArduinoOTA.setHostname(device_hostname.c_str()); ArduinoOTA.begin();
 
+    // TCP-Server fuer Modbus-Extender (nur im Radar-Modus aktiv nutzbar)
     tcpServer.begin();
     Serial.printf("[System] WLAN-Serial-Extender lauscht auf Port %d.\n", TCP_PORT);
 }
 
 void loop() {
     if (WiFi.getMode() == WIFI_MODE_AP) dnsServer.processNextRequest();
-    server.handleClient(); 
-    ArduinoOTA.handle();
+    server.handleClient(); ArduinoOTA.handle();
 
-    // 1. Prüfen, ob ein PC eine Verbindung aufbauen möchte
     if (!tcpClient || !tcpClient.connected()) {
         tcpClient = tcpServer.available(); 
         if (tcpClient) {
-            Serial.println("\n[Extender] >>> PC erfolgreich verbunden! Schalte Radar auf DAUERSTROM. <<<");
-            // ZWECKS NETZWERK-BRIDGE: Sensor dauerhaft einschalten, damit er für den PC antwortet!
-            digitalWrite(SEN_POWER_PIN, HIGH); 
+            Serial.println("[Extender] PC verbunden! Schalte Sensor auf DAUERSTROM.");
+            digitalWrite(SEN_POWER_PIN, HIGH);
         }
     }
 
-    // 2. Wenn der PC verbunden ist: Daten 1:1 durchreichen
     bool isBridgeBusy = false;
     if (tcpClient && tcpClient.connected()) {
-        isBridgeBusy = true; // Blockiert die automatische Hintergrundmessung fest!
-        
-        // Daten vom PC (WLAN) -> an den Radar-Sensor (UART)
-        while (tcpClient.available()) { 
-            SensorSerial.write(tcpClient.read()); 
-        }
-        // Daten vom Radar-Sensor (UART) -> zurück an den PC (WLAN)
-        while (SensorSerial.available()) { 
-            tcpClient.write(SensorSerial.read()); 
-        }
+        isBridgeBusy = true;
+        while (tcpClient.available()) { SensorSerial.write(tcpClient.read()); }
+        while (SensorSerial.available()) { tcpClient.write(SensorSerial.read()); }
     }
 
-    // 3. Wenn der PC die Verbindung trennt: Strom wieder sparen
     static bool lastBridgeState = false;
     if (!isBridgeBusy && lastBridgeState) {
-        Serial.println("\n[Extender] PC getrennt. Schalte Radar-Strom wieder aus.");
+        Serial.println("[Extender] PC getrennt. Schalte Sensor-Strom aus.");
         digitalWrite(SEN_POWER_PIN, LOW);
     }
     lastBridgeState = isBridgeBusy;
 
-    // 4. Hintergrund-Messung NUR wenn das Portal inaktiv UND kein PC verbunden ist
     bool isPortalActive = (WiFi.getMode() == WIFI_MODE_AP || gateway_mac_str == "00:00:00:00:00:00");
 
-    // FIX: lastMeasurementTime wird jetzt absolut sauber zurückgesetzt
     if (!isPortalActive && !isBridgeBusy) {
         if (millis() - lastMeasurementTime > 60000) { 
             lastMeasurementTime = millis(); 
+            
+            // KORREKTUR: Nutzt jetzt den universellen Funktionsnamen aus der v3.2
             Serial.println("[System] Starte automatische Intervall-Hintergrundmessung...");
-            float backgroundValues[5] = {0.0f}; 
-            readModbusSensor(backgroundValues); 
+            runMeasurementCycle(); 
         }
     } else {
-        // Hält den Timer im Labor aktuell, damit er nicht sofort losschießt, wenn die Bridge frei wird
         lastMeasurementTime = millis(); 
     }
-    
     delay(1); 
 }

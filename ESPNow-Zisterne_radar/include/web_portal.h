@@ -14,11 +14,22 @@ extern uint8_t adc_pin;
 extern float adc_factor;
 
 void handleRoot() {
+    // Dynamische Konvertierung der FIRMWARE_VERSION aus der platformio.ini (z.B. 32 -> "3.2")
+    float versionFloat = FIRMWARE_VERSION / 10.0f;
+    String versionString = String(versionFloat, 1);
+
     String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-    // Style erweitert um eine rote Button-Klasse (.btn-danger) für den Reset-Knopf
     html += "<style>body{font-family:Arial;margin:20px;background:#f0f2f5;} .card{background:white;padding:20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);max-width:400px;margin:auto;} input{width:100%;padding:10px;margin:10px 0;box-sizing:border-box;} button{width:100%;padding:12px;background:#28a745;color:white;border:none;border-radius:4px;font-size:16px;cursor:pointer;} .btn-danger{background:#dc3545;margin-top:15px;}</style>";
-    html += "<title>Config</title></head><body><div class='card'><h2>Radar Setup v3.1</h2>";
     
+    // SAUBERE HARDWARE-WEICHE: Verhindert doppelte Überschriften im HTML-Stream
+    #if defined(IS_ULTRASCHALL)
+    html += "<title>Config</title></head><body><div class='card'><h2>Ultrasonic Setup v" + versionString + "</h2>";
+    #elif defined(IS_RADAR)
+    html += "<title>Config</title></head><body><div class='card'><h2>Radar Setup v" + versionString + "</h2>";
+    #else
+    html += "<title>Config</title></head><body><div class='card'><h2>Sensor Setup v" + versionString + "</h2>";
+    #endif
+
     // Hauptformular für die Einstellungen
     html += "<form action='/save' method='POST'>";
     html += "<label>Name:</label><input type='text' name='hostname' value='" + device_hostname + "'>";
@@ -30,7 +41,7 @@ void handleRoot() {
     html += "<label>ADC Faktor:</label><input type='number' step='any' name='adc_factor' value='" + String(adc_factor) + "'>";
     html += "<button type='submit'>Speichern</button></form>";
     
-    // NEU: Ein separates Mini-Formular, das den Reset-Befehl an die neue Route feuert
+    // Der rote Reset-Knopf für den bequemen Laborbetrieb
     html += "<form action='/restart' method='POST'>";
     html += "<button type='submit' class='btn-danger'>ESP32 neu starten</button></form>";
     
@@ -51,7 +62,6 @@ void handleSave() {
     } else { server.send(400, "text/plain", "Fehler"); }
 }
 
-// NEU: Diese Funktion verarbeitet den Klick auf den Reset-Knopf
 void handleRestart() {
     Serial.println("[Webserver] Manueller Reset-Knopf gedrueckt! Starte ESP32 neu...");
     server.send(200, "text/html", "<h3>ESP32 wird neu gestartet... Verbindung trennt sich.</h3>");
@@ -62,10 +72,7 @@ void handleRestart() {
 void setupWebserver() {
     server.on("/", handleRoot); 
     server.on("/save", HTTP_POST, handleSave); 
-    
-    // NEU: Route für den manuellen Software-Reset registrieren
     server.on("/restart", HTTP_POST, handleRestart); 
-    
     server.on("/favicon.ico", []() { server.send(204); });
     server.on("/generate_204", []() { server.send(204); });
     server.on("/success.txt", []() { server.send(200, "text/plain", "success"); });

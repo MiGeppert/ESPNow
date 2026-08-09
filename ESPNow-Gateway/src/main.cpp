@@ -2,6 +2,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h> // Zwingend erforderlich für die Kanal- und Promiscuous-Steuerung
 #include <ArduinoJson.h>
+#include <WiFi.h>
 
 // Universelle Paketstruktur (TLV-Format für die Zukunft)
 #define MAX_PAYLOAD_SIZE 240
@@ -21,6 +22,11 @@ String pendingMac = "";
 void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incoming, int len) {
     memcpy(&incomingUniversalData, incoming, sizeof(incomingUniversalData));
 
+    int8_t gatewayRssi = -95;
+    #if defined(ARDUINO_ARCH_ESP32)
+        gatewayRssi = WiFi.RSSI(); // Greift sich blitzschnell die Signalstaerke der Antenne
+    #endif
+    
     // MAC-Adresse für den Abgleich formatieren
     char macStr[18];
     snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x", 
@@ -50,8 +56,8 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incoming, int len) {
     char jsonBuffer[512];
     int pos = 0;
     pos += snprintf(jsonBuffer + pos, sizeof(jsonBuffer) - pos,
-                    "{\"type\":\"data\",\"mac\":\"%s\",\"sensor_id\":%d,\"fw\":%d,\"raw\":[",
-                    macStr, incomingUniversalData.sensor_type, incomingUniversalData.firmware_ver);
+                    "{\"type\":\"data\",\"mac\":\"%s\",\"sensor_id\":%d,\"fw\":%d,\"rssi_gateway\":%d,\"raw\":[",
+                    macStr, incomingUniversalData.sensor_type, incomingUniversalData.firmware_ver, gatewayRssi);
 
     int payload_len = len - 2;
     for (int i = 0; i < payload_len; i++) {
