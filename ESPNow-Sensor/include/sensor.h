@@ -1,67 +1,89 @@
-// include/modbus_radar.h
-#ifndef MODBUS_RADAR_H
-#define MODBUS_RADAR_H
+// include/sensor.h
+#ifndef SENSOR_H
+#define SENSOR_H
 
 #include <Arduino.h>
 #include <ModbusMaster.h>
 #include "structures.h"
 
-// Externe Objekte aus der main.cpp bekannt machen
+// Externe Objekte und Hardware-Pins aus der main.cpp unfehlbar bekannt machen
 extern HardwareSerial SensorSerial;
 extern ModbusMaster node;
 
-// Hardware-Pins für den Ultraschall-Modus
-#define US_TRIG_PIN 12
-#define US_ECHO_PIN 14
-
-// Universelle Funktion zum Auslesen der Hardware
+// Universelle Funktion zum Auslesen der Hardware (v3.2 Unified)
 bool readSensorHardware(struct_sensor_payload &payload) {
     
     // =========================================================================
-    // MODUS A: ULTRASCHALL-MESSUNG
+    // MODUS A: ULTRASCHALL-MESSUNG VIA UART-PROTOKOLL (A02YYUW / JSN-SR04T)
     // =========================================================================
     #if defined(IS_ULTRASCHALL)
-    Serial.println("[Hardware] Starte Ultraschall-Messung...");
-    pinMode(US_TRIG_PIN, OUTPUT);
-    pinMode(US_ECHO_PIN, INPUT);
+    Serial.println("[Hardware] Starte Ultraschall-Messung via UART...");
     
-    digitalWrite(US_TRIG_PIN, LOW);
-    delayMicroseconds(2);
-    digitalWrite(US_TRIG_PIN, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(US_TRIG_PIN, LOW);
+    // Sensor-Strom einschalten und Puffer leeren
+    digitalWrite(SEN_POWER_PIN, HIGH); 
+    delay(500);
+    while(SensorSerial.available()) SensorSerial.read();
     
-    long duration = pulseIn(US_ECHO_PIN, HIGH, 30000); // 30ms Timeout
+    // Mess-Trigger-Byte abschicken
+    SensorSerial.write(0x55);
     
-    if (duration > 0) {
-        float distanceCm = (duration / 2.0f) * 0.03432f;
-        
-        // Ultraschall nutzt nur den ersten Prozesswert
-        payload.pv1 = distanceCm;
-        payload.pv2 = 0.0f;
-        payload.pv3 = 0.0f;
-        payload.pv4 = 0.0f;
-        payload.pv5 = 0.0f;
-        
-        Serial.printf("[Hardware] Ultraschall-Erfolg! Distanz: %.2f cm\n", payload.pv1);
-        return true;
+    uint32_t start_time = millis(); 
+    uint8_t buf[4] = {0}; 
+    int bytesRead = 0;
+    
+    // Max. 150ms auf die 4 seriellen Antwortbytes warten
+    while ((millis() - start_time < 150) && (bytesRead < 4)) {
+        if (SensorSerial.available()) {
+            buf[bytesRead++] = SensorSerial.read();
+        }
     }
-    Serial.println("[Hardware-FEHLER] Ultraschall-Timeout (Echo ausgeblieben)!");
-    return false;
+    
+    // Strom sofort wieder ausschalten
+    digitalWrite(SEN_POWER_PIN, LOW);
+    
+    // Plausibilitaets- und Checksummenpruefung
+    if (bytesRead != 4 || buf[0] != 0xFF) {
+        Serial.println("[Hardware-FEHLER] Ultraschall-Daten unvollstaendig oder Startbyte fehlt!");
+        return false;
+    }
+    
+    if (((buf[0] + buf[1] + buf[2]) & 0xFF) != buf[3]) {
+        Serial.println("[Hardware-FEHLER] Ultraschall-Checksummenfehler (Daten korrupt)!");
+        return false;
+    }
+    
+    // Distanz in cm umrechnen (Rohwert ist in mm)
+    float distanceCm = ((buf[1] << 8) | buf[2]) / 10.0f;
+    
+    // Unified-Payload befuellen (Ultraschall nutzt nur pv1)
+    payload.pv1 = distanceCm;
+    payload.pv2 = 0.0f;
+    payload.pv3 = 0.0f;
+    payload.pv4 = 0.0f;
+    payload.pv5 = 0.0f;
+    
+    Serial.printf("[Hardware-Erfolg] Ultraschall-Distanz: %.1f cm\n", payload.pv1);
+    return true;
 
     // =========================================================================
     // MODUS B: MODBUS-RADAR-MESSUNG
     // =========================================================================
     #elif defined(IS_RADAR)
-    // Pin 4 (SEN_POWER_PIN) einschalten
-    digitalWrite(4, HIGH); 
+    Serial.println("[Hardware] Starte Modbus-Radar-Messung...");
+    
+    // Sensor-Strom einschalten
+    digitalWrite(SEN_POWER_PIN, HIGH); 
     delay(1500); 
+
+    SensorSerial.end();
+    SensorSerial.begin(115200, SERIAL_8N1, 16, 17);
+    while(SensorSerial.available()) SensorSerial.read();
+
 
     uint8_t result = 0;
     const int maxModbusRetries = 3; 
 
     for (int attempt = 1; attempt <= maxModbusRetries; attempt++) {
-        // Seriellen Puffer leeren
         while(SensorSerial.available()) SensorSerial.read();
 
         Serial.printf("[Modbus] Sende Request ab (Register=910)... (Versuch %d/%d)\n", attempt, maxModbusRetries);
@@ -72,15 +94,17 @@ bool readSensorHardware(struct_sensor_payload &payload) {
         delay(200); 
     }
 
-    // Pin 4 (SEN_POWER_PIN) ausschalten
-    digitalWrite(4, LOW); 
+    SensorSerial.flush();
+
+    // Sensor-Strom wieder ausschalten
+    digitalWrite(SEN_POWER_PIN, LOW); 
 
     if (result == node.ku8MBSuccess) {
         Serial.println("[Modbus-Erfolg] Daten erfolgreich empfangen. Wandle Register...");
         
         RegisterFloat regFloat;
         
-        // KORREKTUR: Indizes [0] und [1] sind jetzt absolut fehlerfrei zugewiesen!
+        // Byte-Swapping für alle 5 Prozesswerte
         regFloat.registers[0] = node.getResponseBuffer(1); regFloat.registers[1] = node.getResponseBuffer(0);
         payload.pv1 = regFloat.value;
         
@@ -102,7 +126,7 @@ bool readSensorHardware(struct_sensor_payload &payload) {
     return false;
     
     #else
-    #error "Kein Sensor-Typ in der platformio.ini definiert!"
+    #error "Kein gueltiger Sensor-Typ in der platformio.ini selektiert!"
     #endif
 }
 

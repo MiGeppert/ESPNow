@@ -1,8 +1,9 @@
 #include <Arduino.h>
 #include <esp_now.h>
-#include <esp_wifi.h> // Zwingend erforderlich für die Kanal- und Promiscuous-Steuerung
+//#include <esp_wifi.h> // Zwingend erforderlich für die Kanal- und Promiscuous-Steuerung
 #include <ArduinoJson.h>
 #include <WiFi.h>
+#include "esp_wifi.h"
 
 // Universelle Paketstruktur (TLV-Format für die Zukunft)
 #define MAX_PAYLOAD_SIZE 240
@@ -14,19 +15,24 @@ typedef struct struct_universal_message {
 
 struct_universal_message incomingUniversalData;
 
+volatile int8_t liveGatewayRssi = -95;
+
+void filterRssiCallback(void *buf, wifi_promiscuous_pkt_type_t type) {
+    wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
+    if (pkt && pkt->rx_ctrl.rssi < 0 && pkt->rx_ctrl.rssi > -120) {
+        liveGatewayRssi = pkt->rx_ctrl.rssi; // Unbestechlicher Echtzeit-Wert!
+    }
+}
+
 // Globale Variablen für die Befehlswarteschlange (Queue)
 String pendingCommand = "ACK"; // Standardmäßig antworten wir nur mit ACK
 String pendingMac = "";
 
-// Callback-Funktion: Wird ausgeführt, wenn ein Client per ESPNow sendet
+// --- VOLLSTÄNDIGER, UNBESTECHLICHER GATEWAY-CALLBACK FÜR CORE v2.x ---
 void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incoming, int len) {
+    // 1. Die universellen Nachrichtendaten kopieren
     memcpy(&incomingUniversalData, incoming, sizeof(incomingUniversalData));
 
-    int8_t gatewayRssi = -95;
-    #if defined(ARDUINO_ARCH_ESP32)
-        gatewayRssi = WiFi.RSSI(); // Greift sich blitzschnell die Signalstaerke der Antenne
-    #endif
-    
     // MAC-Adresse für den Abgleich formatieren
     char macStr[18];
     snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x", 
@@ -49,6 +55,8 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incoming, int len) {
         pendingMac = "";
     }
 
+    Serial.printf("\n[Gateway-Funk] Paket von MAC %s empfangen! Sende Antwort: '%s'\n", macStr, responseMsg.c_str());
+
     // Antwort (ACK oder Befehl) exakt in der Millisekunde zurückfunken
     esp_now_send(mac_addr, (uint8_t *) responseMsg.c_str(), responseMsg.length());
 
@@ -56,8 +64,8 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incoming, int len) {
     char jsonBuffer[512];
     int pos = 0;
     pos += snprintf(jsonBuffer + pos, sizeof(jsonBuffer) - pos,
-                    "{\"type\":\"data\",\"mac\":\"%s\",\"sensor_id\":%d,\"fw\":%d,\"rssi_gateway\":%d,\"raw\":[",
-                    macStr, incomingUniversalData.sensor_type, incomingUniversalData.firmware_ver, gatewayRssi);
+                    "{\"type\":\"data\",\"mac\":\"%s\",\"sensor_id\":%d,\"fw\":%d,\"raw\":[",
+                    macStr, incomingUniversalData.sensor_type, incomingUniversalData.firmware_ver);
 
     int payload_len = len - 2;
     for (int i = 0; i < payload_len; i++) {
@@ -122,8 +130,8 @@ void setup() {
     }
 
     // Empfangs-Callback registrieren
-    esp_now_register_recv_cb((esp_now_recv_cb_t)OnDataRecv);
-    
+    esp_now_register_recv_cb((esp_now_recv_cb_t)OnDataRecv); 
+
     Serial.println("{\"type\":\"log\",\"level\":\"INFO\",\"msg\":\"ESPNow Gateway erfolgreich gestartet!\"}");
 }
 
